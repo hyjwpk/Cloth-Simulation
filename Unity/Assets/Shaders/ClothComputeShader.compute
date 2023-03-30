@@ -1,0 +1,163 @@
+#pragma kernel Init
+#pragma kernel UpdateSpeed
+#pragma kernel UpdatePosition
+
+RWStructuredBuffer<float4> position;
+RWStructuredBuffer<float4> normal;
+RWStructuredBuffer<float4> speed;
+RWStructuredBuffer<float3> force;
+RWStructuredBuffer<float2> uv;
+
+uint vertexnum;
+float L;
+uint springk;
+uint mass;
+float dt;
+float3 springlength;
+float4 sphere;
+
+static uint3 springdir[12] = {
+	{1,0,0},
+	{0,1,0},
+	{-1,0,0},
+	{0,-1,0},
+	{-1,-1,0},
+	{-1,1,0},
+	{1,-1,0},
+	{1,1,0},
+	{-2,0,0},
+	{2,0,0},
+	{0,2,0},
+	{0,-2,0},
+};
+
+static uint3 normaldirs[4] = {
+	{1,0,0},
+	{0,1,0},
+	{-1,0,0},
+	{0,-1,0},
+};
+
+static uint getIndex(uint3 id) {
+	return id.y * vertexnum + id.x;
+}
+
+static float3 getPosition(uint3 id) {
+	return position[getIndex(id)].xyz;
+}
+
+static float3 getNormal(uint3 id) {
+	return normal[getIndex(id)].xyz;
+}
+
+static float3 getSpeed(uint3 id) {
+	return speed[getIndex(id)].xyz;
+}
+
+static float3 getForce(uint3 id) {
+	return force[getIndex(id)].xyz;
+}
+
+static void setPosition(uint3 id, float3 _position) {
+	position[getIndex(id)] = float4(_position, 0);
+}
+
+static void setNormal(uint3 id, float3 _normal) {
+	normal[getIndex(id)] = float4(_normal, 0);
+}
+
+static void setSpeed(uint3 id, float3 _speed) {
+	speed[getIndex(id)] = float4(_speed, 0);
+}
+
+static void setForce(uint3 id, float3 _force) {
+	force[getIndex(id)] = _force;
+}
+
+static float3 getSpring(float3 p, float3 q, uint type) {
+	float3 w = p - q;
+	return w * springk * (springlength[type] * rcp(length(w)) - 1);
+}
+
+static bool isvalidateid(uint3 id) {
+	return id.x >= 0 && id.x < vertexnum&& id.y >= 0 && id.y < vertexnum;
+}
+
+static float3 getF(uint3 id) {
+	float3 f = float3(0, 0, 0);
+	float3 p = getPosition(id);
+	for (uint i = 0; i < 12; i++) {
+		uint3 cur_id = id + springdir[i];
+		if (isvalidateid(cur_id)) {
+			f += getSpring(p, getPosition(cur_id), i / 4);
+		}
+	}
+	float3 fg = float3(0, -9.8, 0) * mass;
+	f += fg;
+	float3 speed = getSpeed(id);
+	float3 fd = -0.5 * speed;
+	f += fd;
+	float3 normal = getNormal(id);
+	float3 fv = 2.0 * (dot(normal, float3(0, 0, -5) - speed)) * normal;
+	f += fv;
+	return f;
+}
+
+static void updatenormal(uint3 id) {
+	float3 normal = float3(0, 0, 0);
+	float3 p = getPosition(id);
+	for (uint i = 0; i < 4; i++) {
+		uint j = (i + 1) % 4;
+		uint3 id1 = id + normaldirs[i];
+		uint3 id2 = id + normaldirs[j];
+		if (isvalidateid(id1) && isvalidateid(id2)) {
+			float3 e1 = getPosition(id1) - p;
+			float3 e2 = getPosition(id2) - p;
+			float3 n = normalize(cross(e1, e2));
+			normal += n;
+			break;
+		}
+	}
+	normal = normalize(normal);
+	setNormal(id, normal);
+}
+
+static void collision(uint3 id) {
+	float3 center = sphere.xyz;
+	float r = sphere.w;
+	float d = distance(getPosition(id), center) - r;
+	float3 p = getPosition(id);
+	float3 speed = getSpeed(id);
+	if (d < 0) {
+		float3 n = normalize(p - center);
+		setPosition(id, p - n * d);
+		setSpeed(id, speed - dot(speed, n) * n);
+	}
+}
+
+[numthreads(8, 8, 1)]
+void Init(uint3 id : SV_DispatchThreadID)
+{
+	setPosition(id, float3(id.x * L, 0, id.y * L));
+	setNormal(id, float3(0, 1, 0));
+	setSpeed(id, float3(0, 0, 0));
+	setForce(id, float3(0, 0, 0));
+	uv[getIndex(id)] = float2(id.x / (vertexnum - 1.0), id.y / (vertexnum - 1.0));
+}
+
+[numthreads(8, 8, 1)]
+void UpdateSpeed(uint3 id : SV_DispatchThreadID)
+{
+	setForce(id, getF(id));
+	setSpeed(id, getSpeed(id) + getForce(id) * rcp(mass) * dt);
+}
+
+[numthreads(8, 8, 1)]
+void UpdatePosition(uint3 id : SV_DispatchThreadID)
+{
+	if (!(id.y == 0 && (id.x == 0 || id.x == vertexnum - 1))) {
+		setPosition(id, getPosition(id) + getSpeed(id) * dt);
+	}
+	collision(id);
+	updatenormal(id);
+}
